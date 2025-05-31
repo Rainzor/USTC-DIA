@@ -1,3 +1,6 @@
 example
 .history
 .vscode
+datasets
+outputs
+__pycache__

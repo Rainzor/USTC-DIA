@@ -2,124 +2,139 @@ import numpy as np
 import time
 import matplotlib.pyplot as plt
 from spherical_hashing import SphericalHashing
-from evaluation import calculate_map, calculate_precision_recall
-
+from evaluation import calculate_map_and_curves, evaluate_storage_and_time
+import os
 def load_data():
-    """加载数据
-    这里需要根据实际数据格式进行修改
-    """
-    # 示例数据加载
-    features = np.random.randn(16000, 768)  # 替换为实际数据
-    labels = np.random.randint(0, 38, (16000, 5))  # 替换为实际数据
+    """Load the dataset from npz file"""
+    print("Loading dataset...")
+    data = np.load('datasets/data.npz')
+    features = data['arr_0']  # 16000x768 image features
+    labels = data['arr_1']    # 16000x38 image labels
     return features, labels
 
-def create_relevance_matrix(query_labels, db_labels):
-    """创建相关性矩阵"""
-    n_queries = len(query_labels)
-    n_db = len(db_labels)
-    relevance = np.zeros((n_queries, n_db))
-    
-    for i in range(n_queries):
-        for j in range(n_db):
-            if np.any(np.isin(query_labels[i], db_labels[j])):
-                relevance[i, j] = 1
-                
-    return relevance
 
 def main():
-    # 加载数据
+    # Load dataset
     features, labels = load_data()
-    
-    # 划分查询集和数据库
-    query_features = features[:2000]
-    query_labels = labels[:2000]
-    db_features = features[2000:]
-    db_labels = labels[2000:]
-    
-    # 创建相关性矩阵
-    relevance_matrix = create_relevance_matrix(query_labels, db_labels)
-    
-    # 测试不同的比特数
+
+    # Hyper-parameters
+    data_size = len(features)
+    # data_size = 4000
+    iteration_times = 4000
     bit_lengths = [16, 32, 64, 128]
-    results = {}
     
+    # Split into query and database sets
+    query_features = features[:1000]
+    query_labels = labels[:1000].astype(bool)
+    db_features = features[1000: data_size]
+    db_labels = labels[1000:data_size].astype(bool)
+    
+    # Create relevance matrix
+    print("Creating relevance matrix...")
+    n_queries = len(query_labels)
+    n_db = len(db_labels)
+    relevance_matrix = np.zeros((n_queries, n_db), dtype=bool)
+    for i in range(n_queries):
+        for j in range(n_db):
+            # If any label is shared, then the two images are relevant
+            relevance_matrix[i, j] = np.any(query_labels[i] & db_labels[j]) 
+    
+
+    mAP_list = []
+    storage_list = []
+    query_time_list = []
+    recall_list = {}
+    precision_list = {}
+
+    if not os.path.exists('outputs'):
+        os.makedirs('outputs')
+
     for n_bits in bit_lengths:
         print(f"\nTesting {n_bits} bits...")
         
-        # 训练球面哈希
-        hasher = SphericalHashing(n_bits)
-        hasher.fit(db_features)
+        # Initialize and train SphericalHashing
+        hasher = SphericalHashing(n_bits=n_bits, max_iter=iteration_times, epsilon_mean=0.01, epsilon_stddev=0.01)
         
-        # 转换特征为哈希码
-        start_time = time.time()
-        db_codes = hasher.transform(db_features)
+        # Train the hasher
+        db_codes = hasher.fit(db_features)
+        
+        # Transform the query features
         query_codes = hasher.transform(query_features)
-        encoding_time = time.time() - start_time
+
+        # Calculate mAP, recall, precision
+        mAP, recall, precision = calculate_map_and_curves(query_codes, db_codes, relevance_matrix)
         
-        # 计算存储消耗
-        storage = db_codes.nbytes / 1024  # KB
+        # Calculate storage and time
+        storage, query_time = evaluate_storage_and_time(query_codes, db_codes)
         
-        # 计算检索时间
-        start_time = time.time()
-        for i in range(len(query_codes)):
-            _ = [hamming(query_codes[i], db_code) for db_code in db_codes]
-        retrieval_time = (time.time() - start_time) / len(query_codes)
-        
-        # 计算mAP
-        map_score = calculate_map(query_codes, db_codes, relevance_matrix)
-        
-        # 计算precision@K和recall@K
-        k_values = [1, 5, 10, 20, 50, 100]
-        precisions, recalls = calculate_precision_recall(
-            query_codes, db_codes, relevance_matrix, k_values)
-        
-        results[n_bits] = {
-            'mAP': map_score,
-            'storage': storage,
-            'retrieval_time': retrieval_time,
-            'precisions': precisions,
-            'recalls': recalls
-        }
-        
-        print(f"mAP: {map_score:.4f}")
-        print(f"Storage: {storage:.2f} KB")
-        print(f"Average retrieval time: {retrieval_time*1000:.2f} ms")
+        mAP_list.append(mAP)
+        storage_list.append(storage)
+        query_time_list.append(query_time)
+        recall_list[n_bits] = recall
+        precision_list[n_bits] = precision
+        print(f"n_bits: {n_bits}, mAP: {mAP:.4f}, storage: {storage/1024/1024:.2f} MB, query_time: {query_time:.4f} s")
     
-    # 绘制结果
-    plt.figure(figsize=(15, 5))
-    
-    # Precision@K曲线
-    plt.subplot(131)
-    for n_bits in bit_lengths:
-        precisions = [np.mean(results[n_bits]['precisions'][k]) for k in k_values]
-        plt.plot(k_values, precisions, label=f'{n_bits} bits')
-    plt.xlabel('K')
-    plt.ylabel('Precision@K')
-    plt.legend()
-    
-    # Recall@K曲线
-    plt.subplot(132)
-    for n_bits in bit_lengths:
-        recalls = [np.mean(results[n_bits]['recalls'][k]) for k in k_values]
-        plt.plot(k_values, recalls, label=f'{n_bits} bits')
-    plt.xlabel('K')
-    plt.ylabel('Recall@K')
-    plt.legend()
-    
-    # 性能指标对比
-    plt.subplot(133)
-    x = np.arange(len(bit_lengths))
-    width = 0.35
-    
-    maps = [results[n_bits]['mAP'] for n_bits in bit_lengths]
-    plt.bar(x, maps, width, label='mAP')
-    plt.xlabel('Bit Length')
-    plt.ylabel('mAP')
-    plt.xticks(x, bit_lengths)
-    
+    # Create mAP vs Bits plot
+    plt.figure(figsize=(10, 6))
+    plt.plot(bit_lengths, mAP_list, marker='o', linestyle='-', color='#2E86C1', linewidth=2, markersize=8)
+    plt.xlabel('Number of Bits', fontsize=12)
+    plt.ylabel('Mean Average Precision (mAP)', fontsize=12)
+    plt.title('mAP vs. Number of Bits', fontsize=14, pad=15)
+    plt.grid(True, linestyle='--', alpha=0.7)
     plt.tight_layout()
-    plt.savefig('results.png')
+    plt.savefig(os.path.join('outputs', 'mAP_vs_bits.png'), dpi=300, bbox_inches='tight')
     plt.close()
 
+    # Create Storage and Query Time vs Bits plot
+    fig, ax1 = plt.subplots(figsize=(10, 6))
+    
+    # Plot storage on primary y-axis
+    ax1.plot(bit_lengths, [s/1024/1024 for s in storage_list], marker='o', linestyle='-', color='blue', linewidth=2, markersize=8)
+    ax1.set_xlabel('Number of Bits', fontsize=12)
+    ax1.set_ylabel('Storage (MB)', fontsize=12, color='blue')
+    ax1.tick_params(axis='y', labelcolor='blue')
+    
+    # Create secondary y-axis and plot query time
+    ax2 = ax1.twinx()
+    ax2.plot(bit_lengths, [t * 1000 for t in query_time_list], marker='o', linestyle='-', color='orange', linewidth=2, markersize=8)
+    ax2.set_ylabel('Query Time (ms)', fontsize=12, color='orange')
+    ax2.tick_params(axis='y', labelcolor='orange')
+    
+    plt.title('Storage Consumption and Query Time vs. Number of Bits', fontsize=14, pad=15)
+    plt.grid(True, linestyle='--', alpha=0.7)
+    plt.tight_layout()
+    plt.savefig(os.path.join('outputs', 'storage_and_time_vs_bits.png'), dpi=300, bbox_inches='tight')
+    plt.close()
+
+    # Create Precision-Recall curve
+    plt.figure(figsize=(10, 6))
+    for i, n_bits in enumerate(bit_lengths):
+        plt.plot(recall_list[n_bits], precision_list[n_bits], 
+                label=f'{n_bits}-bit', 
+                linewidth=2)
+    plt.xlabel('Recall', fontsize=12)
+    plt.ylabel('Precision', fontsize=12)
+    plt.title('Precision-Recall Curve', fontsize=14, pad=15)
+    plt.grid(True, linestyle='--', alpha=0.7)
+    plt.legend(fontsize=10, frameon=True, fancybox=True, shadow=True)
+    plt.tight_layout()
+    plt.savefig(os.path.join('outputs', 'PR_curve.png'), dpi=300, bbox_inches='tight')
+    plt.close()
+
+
+    # save the recall and precision for each bit length
+    for i, n_bits in enumerate(bit_lengths):
+        if not os.path.exists(os.path.join('outputs', f'{n_bits}bits')):
+            os.makedirs(os.path.join('outputs', f'{n_bits}bits'))
+        np.save(os.path.join('outputs', f'{n_bits}bits', f'recall.npy'), recall_list[n_bits])
+        np.save(os.path.join('outputs', f'{n_bits}bits', f'precision.npy'), precision_list[n_bits])
+
+    # save the mAP, storage, and query time in one file
+    list_of_dicts = [
+        {'mAP': mAP_list, 'storage': storage_list, 'query_time': query_time_list, 'bit_lengths': bit_lengths}
+    ]
+    np.save(os.path.join('outputs', 'metrics.npy'), list_of_dicts)
+
+
 if __name__ == "__main__":
-    main() 
+    main()
