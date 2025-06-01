@@ -16,13 +16,12 @@ def test_spherical_hash():
     labels = data['arr_1']    # 16000x38 的图像标签
     
     # 2. 分割数据集
-    data_size = 2000
-    train_size = int(data_size * 0.8)
-    n_query = data_size - train_size
-    query_features = features[train_size:data_size]
-    query_labels = labels[train_size:data_size].astype(bool)
-    db_features = features[:train_size]
-    db_labels = labels[:train_size].astype(bool)
+    data_size = len(features)
+    n_query = 1000
+    query_features = features[:n_query]
+    query_labels = labels[:n_query].astype(bool)
+    db_features = features[n_query:]
+    db_labels = labels[n_query:].astype(bool)
     
     # 3. 创建相关性矩阵
     print("Creating relevance matrix...")
@@ -33,13 +32,13 @@ def test_spherical_hash():
             relevance_matrix[i, j] = np.any(db_labels[j] & query_labels[i]).astype(bool)
     
     # 4. 训练哈希模型
-    n_bits = 48
+    n_bits = 64
     print(f"\nTraining with {n_bits} bits...")
-    hasher = SphericalHashing(n_bits=n_bits, max_iter=100, overlap_ratio=0.25)
+    hasher = SphericalHashing(n_bits=n_bits, max_iter=200, overlap_ratio=0.25, epsilon_mean=0.01, epsilon_stddev=0.01)
     
     # 训练并记录时间
     start_time = time.time()
-    db_codes = hasher.fit(db_features)
+    db_codes = hasher.fit(db_features, visualize=True)
     training_time = time.time() - start_time
     print(f"Training completed in {training_time:.2f} seconds")
     

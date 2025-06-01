@@ -2,8 +2,9 @@ import numpy as np
 import time
 import matplotlib.pyplot as plt
 from spherical_hashing import SphericalHashing
-from evaluation import calculate_map_and_curves, evaluate_storage_and_time
+from evaluation import calculate_map_and_curves, evaluate_storage_and_time, calculate_map_at_k
 import os
+
 def load_data():
     """Load the dataset from npz file"""
     print("Loading dataset...")
@@ -20,7 +21,9 @@ def main():
     # Hyper-parameters
     data_size = len(features)
     # data_size = 4000
-    iteration_times = 4000
+    iteration_times = 200
+    epsilon_mean = 0.1
+    epsilon_stddev = 0.15
     bit_lengths = [16, 32, 64, 128]
     
     # Split into query and database sets
@@ -41,6 +44,7 @@ def main():
     
 
     mAP_list = []
+    mAP_at_100_list = []
     storage_list = []
     query_time_list = []
     recall_list = {}
@@ -53,7 +57,7 @@ def main():
         print(f"\nTesting {n_bits} bits...")
         
         # Initialize and train SphericalHashing
-        hasher = SphericalHashing(n_bits=n_bits, max_iter=iteration_times, epsilon_mean=0.01, epsilon_stddev=0.01)
+        hasher = SphericalHashing(n_bits=n_bits, max_iter=iteration_times, epsilon_mean=epsilon_mean, epsilon_stddev=epsilon_stddev)
         
         # Train the hasher
         db_codes = hasher.fit(db_features)
@@ -64,23 +68,29 @@ def main():
         # Calculate mAP, recall, precision
         mAP, recall, precision = calculate_map_and_curves(query_codes, db_codes, relevance_matrix)
         
+        # Calculate mAP@100
+        mAP_at_100 = calculate_map_at_k(query_codes, db_codes, relevance_matrix, k=100)
+        
         # Calculate storage and time
         storage, query_time = evaluate_storage_and_time(query_codes, db_codes)
         
         mAP_list.append(mAP)
+        mAP_at_100_list.append(mAP_at_100)
         storage_list.append(storage)
         query_time_list.append(query_time)
         recall_list[n_bits] = recall
         precision_list[n_bits] = precision
-        print(f"n_bits: {n_bits}, mAP: {mAP:.4f}, storage: {storage/1024/1024:.2f} MB, query_time: {query_time:.4f} s")
+        print(f"n_bits: {n_bits}, mAP: {mAP:.4f}, mAP@100: {mAP_at_100:.4f}, storage: {storage/1024:.2f} KB, query_time: {query_time:.4f} s")
     
     # Create mAP vs Bits plot
     plt.figure(figsize=(10, 6))
-    plt.plot(bit_lengths, mAP_list, marker='o', linestyle='-', color='#2E86C1', linewidth=2, markersize=8)
+    plt.plot(bit_lengths, mAP_list, marker='o', linestyle='-', color='#2E86C1', linewidth=2, markersize=8, label='mAP')
+    plt.plot(bit_lengths, mAP_at_100_list, marker='s', linestyle='--', color='#E74C3C', linewidth=2, markersize=8, label='mAP@100')
     plt.xlabel('Number of Bits', fontsize=12)
-    plt.ylabel('Mean Average Precision (mAP)', fontsize=12)
-    plt.title('mAP vs. Number of Bits', fontsize=14, pad=15)
+    plt.ylabel('Mean Average Precision', fontsize=12)
+    plt.title('mAP and mAP@100 vs. Number of Bits', fontsize=14, pad=15)
     plt.grid(True, linestyle='--', alpha=0.7)
+    plt.legend(fontsize=10)
     plt.tight_layout()
     plt.savefig(os.path.join('outputs', 'mAP_vs_bits.png'), dpi=300, bbox_inches='tight')
     plt.close()
@@ -89,16 +99,16 @@ def main():
     fig, ax1 = plt.subplots(figsize=(10, 6))
     
     # Plot storage on primary y-axis
-    ax1.plot(bit_lengths, [s/1024/1024 for s in storage_list], marker='o', linestyle='-', color='blue', linewidth=2, markersize=8)
+    ax1.plot(bit_lengths, [s/1024 for s in storage_list], marker='o', linestyle='-', color='blue', linewidth=2, markersize=8)
     ax1.set_xlabel('Number of Bits', fontsize=12)
-    ax1.set_ylabel('Storage (MB)', fontsize=12, color='blue')
+    ax1.set_ylabel('Storage (KB)', fontsize=12, color='blue')
     ax1.tick_params(axis='y', labelcolor='blue')
     
     # Create secondary y-axis and plot query time
     ax2 = ax1.twinx()
-    ax2.plot(bit_lengths, [t * 1000 for t in query_time_list], marker='o', linestyle='-', color='orange', linewidth=2, markersize=8)
-    ax2.set_ylabel('Query Time (ms)', fontsize=12, color='orange')
-    ax2.tick_params(axis='y', labelcolor='orange')
+    ax2.plot(bit_lengths, [t * 1000 for t in query_time_list], marker='o', linestyle='-', color='red', linewidth=2, markersize=8)
+    ax2.set_ylabel('Query Time (ms)', fontsize=12, color='red')
+    ax2.tick_params(axis='y', labelcolor='red')
     
     plt.title('Storage Consumption and Query Time vs. Number of Bits', fontsize=14, pad=15)
     plt.grid(True, linestyle='--', alpha=0.7)
@@ -121,17 +131,38 @@ def main():
     plt.savefig(os.path.join('outputs', 'PR_curve.png'), dpi=300, bbox_inches='tight')
     plt.close()
 
-
-    # save the recall and precision for each bit length
+    # Create recall curve
+    plt.figure(figsize=(10, 6))
     for i, n_bits in enumerate(bit_lengths):
-        if not os.path.exists(os.path.join('outputs', f'{n_bits}bits')):
-            os.makedirs(os.path.join('outputs', f'{n_bits}bits'))
-        np.save(os.path.join('outputs', f'{n_bits}bits', f'recall.npy'), recall_list[n_bits])
-        np.save(os.path.join('outputs', f'{n_bits}bits', f'precision.npy'), precision_list[n_bits])
+        plt.plot(recall_list[n_bits], label=f'{n_bits}-bit', linewidth=2)
+    plt.xlabel('Number of Samples', fontsize=12)
+    plt.ylabel('Recall', fontsize=12)
+    plt.title('Recall Curve', fontsize=14, pad=15)
+    # log scale
+    plt.xscale('log')
+    plt.grid(True, linestyle='--', alpha=0.7)
+    plt.legend(fontsize=10, frameon=True, fancybox=True, shadow=True)
+    plt.tight_layout()
+    plt.savefig(os.path.join('outputs', 'recall_curve.png'), dpi=300, bbox_inches='tight')
+    plt.close()
+
+    # Create precision curve
+    plt.figure(figsize=(10, 6))
+    for i, n_bits in enumerate(bit_lengths):
+        plt.plot(precision_list[n_bits], label=f'{n_bits}-bit', linewidth=2)
+    plt.xlabel('Number of Samples', fontsize=12)
+    plt.ylabel('Precision', fontsize=12)
+    plt.title('Precision Curve', fontsize=14, pad=15)
+    plt.xscale('log')
+    plt.grid(True, linestyle='--', alpha=0.7)
+    plt.legend(fontsize=10, frameon=True, fancybox=True, shadow=True)
+    plt.tight_layout()
+    plt.savefig(os.path.join('outputs', 'precision_curve.png'), dpi=300, bbox_inches='tight')
+    plt.close()
 
     # save the mAP, storage, and query time in one file
     list_of_dicts = [
-        {'mAP': mAP_list, 'storage': storage_list, 'query_time': query_time_list, 'bit_lengths': bit_lengths}
+        {'mAP': mAP_list, 'mAP@100': mAP_at_100_list, 'storage': storage_list, 'query_time': query_time_list, 'bit_lengths': bit_lengths}
     ]
     np.save(os.path.join('outputs', 'metrics.npy'), list_of_dicts)
 
