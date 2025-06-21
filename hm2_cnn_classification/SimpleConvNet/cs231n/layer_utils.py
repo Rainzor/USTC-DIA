@@ -32,6 +32,19 @@ pass
 
 # *****END OF YOUR CODE (DO NOT DELETE/MODIFY THIS LINE)*****
 
+def affine_relu_forward_cupy(x, w, b):
+    """GPU版本：仿照affine_relu_forward，假设x, w, b均为cupy数组。"""
+    a, fc_cache = affine_forward(x, w, b)
+    out, relu_cache = relu_forward_cupy(a)
+    cache = (fc_cache, relu_cache)
+    return out, cache
+
+def affine_relu_backward_cupy(dout, cache):
+    fc_cache, relu_cache = cache
+    da = relu_backward_cupy(dout, relu_cache)
+    dx, dw, db = affine_backward(da, fc_cache)
+    return dx, dw, db
+
 def conv_relu_forward(x, w, b, conv_param):
     """A convenience layer that performs a convolution followed by a ReLU.
 
@@ -116,4 +129,30 @@ def conv_relu_pool_backward(dout, cache):
     ds = max_pool_backward_fast(dout, pool_cache)
     da = relu_backward(ds, relu_cache)
     dx, dw, db = conv_backward_fast(da, conv_cache)
+    return dx, dw, db
+
+def conv_relu_forward_cupy(x, w, b, conv_param):
+    a, conv_cache = conv_forward_cupy(x, w, b, conv_param)
+    out, relu_cache = relu_forward_cupy(a)
+    cache = (conv_cache, relu_cache)
+    return out, cache
+
+def conv_relu_backward_cupy(dout, cache):
+    conv_cache, relu_cache = cache
+    da = relu_backward_cupy(dout, relu_cache)
+    dx, dw, db = conv_backward_cupy(da, conv_cache)
+    return dx, dw, db
+
+def conv_relu_pool_forward_cupy(x, w, b, conv_param, pool_param):
+    a, conv_cache = conv_forward_cupy(x, w, b, conv_param)
+    s, relu_cache = relu_forward_cupy(a)
+    out, pool_cache = max_pool_forward_cupy(s, pool_param)
+    cache = (conv_cache, relu_cache, pool_cache)
+    return out, cache
+
+def conv_relu_pool_backward_cupy(dout, cache):
+    conv_cache, relu_cache, pool_cache = cache
+    ds = max_pool_backward_cupy(dout, pool_cache)
+    da = relu_backward_cupy(ds, relu_cache)
+    dx, dw, db = conv_backward_cupy(da, conv_cache)
     return dx, dw, db

@@ -1,5 +1,6 @@
 example
 .history
 .vscode
-outputs
+output*/
 __pycache__
+*.pkl

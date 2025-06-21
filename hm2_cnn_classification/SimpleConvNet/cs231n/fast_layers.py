@@ -1,5 +1,6 @@
 from __future__ import print_function
 import numpy as np
+import cupy as cp
 
 try:
     from .im2col_cython import col2im_cython, im2col_cython
@@ -280,3 +281,138 @@ def max_pool_backward_im2col(dout, cache):
     dx = dx.reshape(x.shape)
 
     return dx
+
+
+def im2col_cupy(x, field_height, field_width, padding=1, stride=1):
+    """
+    GPU im2col for 4D input x (N, C, H, W), returns (C*field_height*field_width, N*out_h*out_w)
+    """
+    N, C, H, W = x.shape
+    out_h = (H + 2 * padding - field_height) // stride + 1
+    out_w = (W + 2 * padding - field_width) // stride + 1
+    x_padded = cp.pad(x, ((0,0), (0,0), (padding,padding), (padding,padding)), mode='constant')
+    cols = cp.zeros((N, C, field_height, field_width, out_h, out_w), dtype=x.dtype)
+    for y in range(field_height):
+        y_max = y + stride * out_h
+        for x_ in range(field_width):
+            x_max = x_ + stride * out_w
+            cols[:, :, y, x_, :, :] = x_padded[:, :, y:y_max:stride, x_:x_max:stride]
+    cols = cols.transpose(1,2,3,0,4,5).reshape(C*field_height*field_width, N*out_h*out_w)
+    return cols
+
+def col2im_cupy(cols, x_shape, field_height, field_width, padding=1, stride=1):
+    N, C, H, W = x_shape
+    out_h = (H + 2 * padding - field_height) // stride + 1
+    out_w = (W + 2 * padding - field_width) // stride + 1
+    x_padded = cp.zeros((N, C, H + 2*padding, W + 2*padding), dtype=cols.dtype)
+    cols_reshaped = cols.reshape(C, field_height, field_width, N, out_h, out_w).transpose(3,0,1,2,4,5)
+    for y in range(field_height):
+        y_max = y + stride * out_h
+        for x_ in range(field_width):
+            x_max = x_ + stride * out_w
+            x_padded[:, :, y:y_max:stride, x_:x_max:stride] += cols_reshaped[:, :, y, x_, :, :]
+    if padding == 0:
+        return x_padded
+    return x_padded[:, :, padding:-padding, padding:-padding]
+
+
+def conv_forward_cupy(x, w, b, conv_param):
+    N, C, H, W = x.shape
+    F, _, HH, WW = w.shape
+    stride, pad = conv_param["stride"], conv_param["pad"]
+    out_H = (H + 2 * pad - HH) // stride + 1
+    out_W = (W + 2 * pad - WW) // stride + 1
+    x_cols = im2col_cupy(x, HH, WW, pad, stride)
+    w_cols = w.reshape(F, -1)
+    out = w_cols @ x_cols + b.reshape(-1, 1)
+    out = out.reshape(F, N, out_H, out_W).transpose(1, 0, 2, 3)
+    cache = (x, w, b, conv_param, x_cols)
+    return out, cache
+
+
+def relu_forward_cupy(x):
+    out = cp.maximum(0, x)
+    cache = x
+    return out, cache
+
+
+def max_pool_forward_cupy(x, pool_param):
+    N, C, H, W = x.shape
+    pool_height, pool_width = pool_param["pool_height"], pool_param["pool_width"]
+    stride = pool_param["stride"]
+    out_H = (H - pool_height) // stride + 1
+    out_W = (W - pool_width) // stride + 1
+    x_reshaped = x.reshape(N*C, 1, H, W)
+    x_cols = im2col_cupy(x_reshaped, pool_height, pool_width, padding=0, stride=stride)
+    x_cols_argmax = cp.argmax(x_cols, axis=0)
+    x_cols_max = x_cols[x_cols_argmax, cp.arange(x_cols.shape[1])]
+    out = x_cols_max.reshape(N, C, out_H, out_W)
+    cache = (x, x_cols, x_cols_argmax, pool_param)
+    return out, cache
+
+
+def conv_relu_forward_cupy(x, w, b, conv_param):
+    a, conv_cache = conv_forward_cupy(x, w, b, conv_param)
+    out, relu_cache = relu_forward_cupy(a)
+    cache = (conv_cache, relu_cache)
+    return out, cache
+
+
+def conv_relu_pool_forward_cupy(x, w, b, conv_param, pool_param):
+    a, conv_cache = conv_forward_cupy(x, w, b, conv_param)
+    s, relu_cache = relu_forward_cupy(a)
+    out, pool_cache = max_pool_forward_cupy(s, pool_param)
+    cache = (conv_cache, relu_cache, pool_cache)
+    return out, cache
+
+
+def conv_backward_cupy(dout, cache):
+    x, w, b, conv_param, x_cols = cache
+    stride, pad = conv_param["stride"], conv_param["pad"]
+    N, C, H, W = x.shape
+    F, _, HH, WW = w.shape
+    out_H = (H + 2 * pad - HH) // stride + 1
+    out_W = (W + 2 * pad - WW) // stride + 1
+    dout_reshaped = dout.transpose(1, 0, 2, 3).reshape(F, -1)
+    db = cp.sum(dout, axis=(0,2,3))
+    dw = dout_reshaped @ x_cols.T
+    dw = dw.reshape(w.shape)
+    dx_cols = w.reshape(F, -1).T @ dout_reshaped
+    dx = col2im_cupy(dx_cols, x.shape, HH, WW, pad, stride)
+    return dx, dw, db
+
+
+def relu_backward_cupy(dout, cache):
+    x = cache
+    dx = dout * (x > 0)
+    return dx
+
+
+def max_pool_backward_cupy(dout, cache):
+    x, x_cols, x_cols_argmax, pool_param = cache
+    N, C, H, W = x.shape
+    pool_height, pool_width = pool_param["pool_height"], pool_param["pool_width"]
+    stride = pool_param["stride"]
+    out_H = (H - pool_height) // stride + 1
+    out_W = (W - pool_width) // stride + 1
+    dout_flat = dout.flatten()
+    dx_cols = cp.zeros_like(x_cols)
+    dx_cols[x_cols_argmax, cp.arange(dx_cols.shape[1])] = dout_flat
+    dx = col2im_cupy(dx_cols, (N*C, 1, H, W), pool_height, pool_width, padding=0, stride=stride)
+    dx = dx.reshape(x.shape)
+    return dx
+
+
+def conv_relu_backward_cupy(dout, cache):
+    conv_cache, relu_cache = cache
+    da = relu_backward_cupy(dout, relu_cache)
+    dx, dw, db = conv_backward_cupy(da, conv_cache)
+    return dx, dw, db
+
+
+def conv_relu_pool_backward_cupy(dout, cache):
+    conv_cache, relu_cache, pool_cache = cache
+    ds = max_pool_backward_cupy(dout, pool_cache)
+    da = relu_backward_cupy(ds, relu_cache)
+    dx, dw, db = conv_backward_cupy(da, conv_cache)
+    return dx, dw, db

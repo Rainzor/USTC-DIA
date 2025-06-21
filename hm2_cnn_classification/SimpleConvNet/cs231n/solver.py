@@ -8,6 +8,8 @@ import os
 import pickle as pickle
 
 import numpy as np
+import cupy as cp
+from tqdm import tqdm
 
 from cs231n import optim
 
@@ -80,7 +82,7 @@ class Solver(object):
         names to gradients of the loss with respect to those parameters.
     """
 
-    def __init__(self, model, data, **kwargs):
+    def __init__(self, model=None, data=None, **kwargs):
         """
         Construct a new Solver instance.
 
@@ -115,11 +117,21 @@ class Solver(object):
         - checkpoint_name: If not None, then save model checkpoints here every
           epoch.
         """
+        if model is None or data is None:
+            return
+        
         self.model = model
         self.X_train = data["X_train"]
         self.y_train = data["y_train"]
+        # shuffle
+        indices = np.arange(self.X_train.shape[0])
+        np.random.shuffle(indices)
+        self.X_train = self.X_train[indices]
+        self.y_train = self.y_train[indices]
         self.X_val = data["X_val"]
         self.y_val = data["y_val"]
+        # shuffle
+        indices = np.arange(self.X_val.shape[0])
 
         # Unpack keyword arguments
         self.update_rule = kwargs.pop("update_rule", "sgd")
@@ -188,6 +200,21 @@ class Solver(object):
             next_w, next_config = self.update_rule(w, dw, config)
             self.model.params[p] = next_w
             self.optim_configs[p] = next_config
+
+    def from_pretrained(self, checkpoint_path):
+        with open(checkpoint_path, "rb") as f:
+            checkpoint = pickle.load(f)
+        self.model = checkpoint["model"]
+        self.update_rule = checkpoint["update_rule"]
+        self.lr_decay = checkpoint["lr_decay"]
+        self.optim_config = checkpoint["optim_config"]
+        self.batch_size = checkpoint["batch_size"]
+        self.num_train_samples = checkpoint["num_train_samples"]
+        self.num_val_samples = checkpoint["num_val_samples"]
+        self.epoch = checkpoint["epoch"]
+        self.loss_history = checkpoint["loss_history"]
+        self.train_acc_history = checkpoint["train_acc_history"]
+        self.val_acc_history = checkpoint["val_acc_history"]
 
     def _save_checkpoint(self):
         if self.checkpoint_name is None:
@@ -258,52 +285,122 @@ class Solver(object):
         num_train = self.X_train.shape[0]
         iterations_per_epoch = max(num_train // self.batch_size, 1)
         num_iterations = self.num_epochs * iterations_per_epoch
+        for epoch in tqdm(range(self.num_epochs), desc="Epoch"):
+            with tqdm(total=iterations_per_epoch, desc="Iteration") as pbar:
+                for t in range(iterations_per_epoch):
+                    self._step()
+                    # Maybe print training loss
+                    if self.verbose and t % self.print_every == 0:
+                        print(
+                            "(Iteration %d / %d) loss: %f"
+                            % (t + 1, num_iterations, self.loss_history[-1])
+                        )
 
-        for t in range(num_iterations):
-            self._step()
+                    # At the end of every epoch, increment the epoch counter and decay
+                    # the learning rate.
+                    epoch_end = (t + 1) % iterations_per_epoch == 0
+                    if epoch_end:
+                        self.epoch += 1
+                        for k in self.optim_configs:
+                            self.optim_configs[k]["learning_rate"] *= self.lr_decay
 
-            # Maybe print training loss
-            if self.verbose and t % self.print_every == 0:
-                print(
-                    "(Iteration %d / %d) loss: %f"
-                    % (t + 1, num_iterations, self.loss_history[-1])
-                )
+                    # Check train and val accuracy on the first iteration, the last
+                    # iteration, and at the end of each epoch.
+                    first_it = t == 0
+                    last_it = t == num_iterations - 1
+                    if first_it or last_it or epoch_end:
+                        train_acc = self.check_accuracy(
+                            self.X_train, self.y_train, num_samples=self.num_train_samples
+                        )
+                        val_acc = self.check_accuracy(
+                            self.X_val, self.y_val, num_samples=self.num_val_samples
+                        )
+                        self.train_acc_history.append(train_acc)
+                        self.val_acc_history.append(val_acc)
+                        self._save_checkpoint()
 
-            # At the end of every epoch, increment the epoch counter and decay
-            # the learning rate.
-            epoch_end = (t + 1) % iterations_per_epoch == 0
-            if epoch_end:
-                self.epoch += 1
-                for k in self.optim_configs:
-                    self.optim_configs[k]["learning_rate"] *= self.lr_decay
+                        if self.verbose:
+                            print(
+                                "(Epoch %d / %d) train acc: %f; val_acc: %f"
+                                % (self.epoch, self.num_epochs, train_acc, val_acc)
+                            )
 
-            # Check train and val accuracy on the first iteration, the last
-            # iteration, and at the end of each epoch.
-            first_it = t == 0
-            last_it = t == num_iterations - 1
-            if first_it or last_it or epoch_end:
-                train_acc = self.check_accuracy(
-                    self.X_train, self.y_train, num_samples=self.num_train_samples
-                )
-                val_acc = self.check_accuracy(
-                    self.X_val, self.y_val, num_samples=self.num_val_samples
-                )
-                self.train_acc_history.append(train_acc)
-                self.val_acc_history.append(val_acc)
-                self._save_checkpoint()
+                        # Keep track of the best model
+                        if val_acc > self.best_val_acc:
+                            self.best_val_acc = val_acc
+                            self.best_params = {}
+                            for k, v in self.model.params.items():
+                                self.best_params[k] = v.copy()
 
-                if self.verbose:
-                    print(
-                        "(Epoch %d / %d) train acc: %f; val_acc: %f"
-                        % (self.epoch, self.num_epochs, train_acc, val_acc)
-                    )
-
-                # Keep track of the best model
-                if val_acc > self.best_val_acc:
-                    self.best_val_acc = val_acc
-                    self.best_params = {}
-                    for k, v in self.model.params.items():
-                        self.best_params[k] = v.copy()
-
+                    pbar.update(1)
+                    pbar.set_postfix(train_acc=train_acc, val_acc=val_acc, loss=self.loss_history[-1])
+        pbar.close()
         # At the end of training swap the best params into the model
         self.model.params = self.best_params
+
+
+class CupySolver(Solver):
+    """
+    基于cupy的Solver，自动将数据和参数转为cupy数组，训练和评估时在CPU/GPU间自动转换。
+    """
+
+
+    def __init__(self, model=None, data=None, **kwargs):
+        super(CupySolver, self).__init__(model, data, **kwargs)
+
+    def _to_device(self, arr):
+        if isinstance(arr, np.ndarray):
+            return cp.asarray(arr)
+        return arr
+
+    def _to_cpu(self, arr):
+        if isinstance(arr, cp.ndarray):
+            return cp.asnumpy(arr)
+        return arr
+
+    def _step(self):
+        num_train = self.X_train.shape[0]
+        batch_mask = np.random.choice(num_train, self.batch_size)
+        X_batch = self._to_device(self.X_train[batch_mask])
+        y_batch = self._to_device(self.y_train[batch_mask])
+
+        # Compute loss and gradient (assume model.loss supports cupy arrays)
+        loss, grads = self.model.loss(X_batch, y_batch)
+        # loss: cupy scalar or numpy scalar
+        if isinstance(loss, cp.ndarray):
+            loss = cp.asnumpy(loss)
+        self.loss_history.append(loss)
+
+        # Perform a parameter update
+        for p, w in self.model.params.items():
+            dw = grads[p]
+            config = self.optim_configs[p]
+            # Ensure w and dw are on GPU
+            w = self._to_device(w)
+            dw = self._to_device(dw)
+            next_w, next_config = self.update_rule(w, dw, config)
+            self.model.params[p] = next_w
+            self.optim_configs[p] = next_config
+
+    def check_accuracy(self, X, y, num_samples=None, batch_size=100):
+        N = X.shape[0]
+        if num_samples is not None and N > num_samples:
+            mask = np.random.choice(N, num_samples)
+            N = num_samples
+            X = X[mask]
+            y = y[mask]
+        num_batches = N // batch_size
+        if N % batch_size != 0:
+            num_batches += 1
+        y_pred = []
+        for i in range(num_batches):
+            start = i * batch_size
+            end = (i + 1) * batch_size
+            X_batch = self._to_device(X[start:end])
+            scores = self.model.loss(X_batch)
+            if isinstance(scores, cp.ndarray):
+                scores = cp.asnumpy(scores)
+            y_pred.append(np.argmax(scores, axis=1))
+        y_pred = np.hstack(y_pred)
+        acc = np.mean(y_pred == y)
+        return acc
