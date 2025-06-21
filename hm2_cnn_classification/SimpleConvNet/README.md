@@ -124,8 +124,11 @@ dout[n, c, i, j] = 1 if x[n, c, h_start:h_end, w_start:w_end] == max_pool else 0
 #### 2.2.4 全连接层（Affine Layer）
 全连接层将特征映射到分类空间。
 
-**前向传播**：`y = Wx + b`
-**反向传播**：`dW = x^T × dy`, `db = sum(dy)`, `dx = dy × W^T`
+**前向传播**：$y = Wx + b$
+**反向传播**：
+$$
+dW = x^T × dy, \quad db = sum(dy),\quad dx = dy × W^T
+$$
 
 #### 2.2.5 Softmax损失函数
 Softmax函数将原始分数转换为概率分布：
