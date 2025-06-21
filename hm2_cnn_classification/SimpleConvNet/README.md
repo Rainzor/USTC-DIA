@@ -1,4 +1,6 @@
-# 基于卷积神经网络的图像分类实验报告
+# DIA Lab2: 基于卷积神经网络的图像分类
+
+> SA24229016, 王润泽
 
 ## 1. 任务说明
 
@@ -31,16 +33,6 @@
 卷积层是CNN的核心组件，通过滑动窗口的方式提取图像的局部特征。
 
 **前向传播**：
-```
-HH = (H + 2×pad - HH) / stride + 1
-WW = (W + 2×pad - WW) / stride + 1
-```
-
-其中：
-- H, W：输入图像的高度和宽度
-- HH, WW：卷积核的高度和宽度
-- pad：填充大小
-- stride：步长
 
 ```python
 def conv_forward_naive(x, w, b, conv_param):
@@ -62,12 +54,55 @@ def conv_forward_naive(x, w, b, conv_param):
     return out
 ```
 
+其中：
+
+- H, W：输入图像的高度和宽度
+- HH, WW：卷积核的高度和宽度
+- pad：填充大小
+- stride：步长
+
 **反向传播**：
 通过链式法则计算梯度，卷积的反向传播实际上是转置卷积操作。
 
+```python
+def conv_backward_naive(dout, cache):
+    dx, dw, db = None, None, None
+    x, w, b, conv_param = cache
+    stride = conv_param['stride']
+    pad = conv_param['pad']
+    N, C, H, W = x.shape
+    F, _, HH, WW = w.shape
+    _, _, H_out, W_out = dout.shape
+
+    x_padded = np.pad(x, ((0,0), (0,0), (pad,pad), (pad,pad)), mode='constant')
+    dx_padded = np.zeros_like(x_padded)
+    dw = np.zeros_like(w)
+    db = np.zeros_like(b)
+
+    # db: sum over N, H_out, W_out
+    db = np.sum(dout, axis=(0,2,3))
+
+    for n in range(N):
+        for f in range(F):
+            for i in range(H_out):
+                for j in range(W_out):
+                    h_start = i * stride
+                    h_end = h_start + HH
+                    w_start = j * stride
+                    w_end = w_start + WW
+                    window = x_padded[n, :, h_start:h_end, w_start:w_end]
+                    dw[f] += window * dout[n, f, i, j]
+                    dx_padded[n, :, h_start:h_end, w_start:w_end] += w[f] * dout[n, f, i, j]
+    # Remove padding from dx_padded
+    dx = dx_padded[:, :, pad:pad+H, pad:pad+W]
+    return dx, dw, db
+```
+
+
+
 #### 2.2.2 激活函数（ReLU）
 ReLU（Rectified Linear Unit）函数定义为：
-```
+```python
 f(x) = max(0, x)
 ```
 
@@ -78,11 +113,11 @@ f(x) = max(0, x)
 最大汇聚层用于降低特征图的空间维度，提取最显著的特征。
 
 **前向传播**：在每个汇聚窗口中选择最大值
-```
+```python
 max_pool = np.max(x[n, c, h_start:h_end, w_start:w_end])
 ```
 **反向传播**：梯度只传递给前向传播中最大值对应的位置
-```
+```python
 dout[n, c, i, j] = 1 if x[n, c, h_start:h_end, w_start:w_end] == max_pool else 0
 ```
 
@@ -94,12 +129,12 @@ dout[n, c, i, j] = 1 if x[n, c, h_start:h_end, w_start:w_end] == max_pool else 0
 
 #### 2.2.5 Softmax损失函数
 Softmax函数将原始分数转换为概率分布：
-```
+```python
 P(y_i) = exp(x_i) / sum(exp(x_j))
 ```
 
 损失函数为交叉熵损失：
-```
+```python
 L = -log(P(y_true))
 ```
 
@@ -232,14 +267,14 @@ Baseline网络结构采用：`(16,32)` 卷积核为5×5的卷积层，`(300,100)
 
 ## 5. 总结
 
-### 5.1 实验成果
+### 5.1 实验结果
 
 本实验成功实现了：
 1. 完整的CNN各层前向和反向传播算法
 2. 基于CIFAR-10数据集的图像分类任务
 3. 系统性的网络架构对比实验
 
-### 5.2 主要发现
+### 5.2 主要结论
 
 1. **网络深度**：在CIFAR-10数据集上，2层卷积+2层全连接的架构表现最佳，过深的网络容易过拟合。
 
